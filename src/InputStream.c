@@ -18,6 +18,16 @@ static float absCurrentPosY;
 // Limited by number of bits in activeGamepadMask
 #define MAX_GAMEPADS 16
 
+typedef struct _PENDING_CONTROLLER_ARRIVAL {
+    bool valid;
+    uint16_t activeGamepadMask;
+    uint8_t type;
+    uint32_t supportedButtonFlags;
+    uint16_t capabilities;
+} PENDING_CONTROLLER_ARRIVAL;
+
+static PENDING_CONTROLLER_ARRIVAL pendingControllerArrivals[MAX_GAMEPADS];
+
 // Accelerometer and gyro
 #define MAX_MOTION_EVENTS 2
 
@@ -647,6 +657,40 @@ static int sendEnableHaptics(void) {
     return err;
 }
 
+static int queueControllerArrivalEvent(uint8_t controllerNumber, uint8_t type,
+                                       uint32_t supportedButtonFlags, uint16_t capabilities) {
+    PPACKET_HOLDER holder;
+    int err;
+
+    // The arrival event is only supported by Sunshine.
+    if (!IS_SUNSHINE()) {
+        return 0;
+    }
+
+    holder = allocatePacketHolder(0);
+    if (holder == NULL) {
+        return -1;
+    }
+
+    holder->channelId = CTRL_CHANNEL_GAMEPAD_BASE + controllerNumber;
+    holder->enetPacketFlags = ENET_PACKET_FLAG_RELIABLE;
+    holder->packet.controllerArrival.header.size = BE32(sizeof(SS_CONTROLLER_ARRIVAL_PACKET) - sizeof(uint32_t));
+    holder->packet.controllerArrival.header.magic = LE32(SS_CONTROLLER_ARRIVAL_MAGIC);
+    holder->packet.controllerArrival.controllerNumber = controllerNumber;
+    holder->packet.controllerArrival.type = type;
+    holder->packet.controllerArrival.capabilities = LE16(capabilities);
+    holder->packet.controllerArrival.supportedButtonFlags = LE32(supportedButtonFlags);
+
+    err = LbqOfferQueueItem(&packetQueue, holder, &holder->entry);
+    if (err != LBQ_SUCCESS) {
+        LC_ASSERT(err == LBQ_BOUND_EXCEEDED);
+        Limelog("Input queue reached maximum size limit\n");
+        freePacketHolder(holder);
+    }
+
+    return err;
+}
+
 // Begin the input stream
 int startInputStream(void) {
     int err;
@@ -671,8 +715,32 @@ int startInputStream(void) {
         return err;
     }
 
-    // Allow input packets to be queued now
+    // Queue cached arrivals before allowing ordinary controller packets. This preserves
+    // advanced controller capabilities when a USB device is claimed before streaming starts.
+    for (int i = 0; i < MAX_GAMEPADS; i++) {
+        PENDING_CONTROLLER_ARRIVAL* pending = &pendingControllerArrivals[i];
+        if (pending->valid) {
+            int arrivalErr = queueControllerArrivalEvent((uint8_t)i, pending->type,
+                                                         pending->supportedButtonFlags,
+                                                         pending->capabilities);
+            if (arrivalErr != 0) {
+                Limelog("Failed to replay controller %d arrival event: %d\n", i, arrivalErr);
+            }
+        }
+    }
+
+    // Allow input packets to be queued now.
     initialized = true;
+
+    // Send compatibility MC packets after the reliable Sunshine arrival packets.
+    for (int i = 0; i < MAX_GAMEPADS; i++) {
+        PENDING_CONTROLLER_ARRIVAL* pending = &pendingControllerArrivals[i];
+        if (pending->valid) {
+            LiSendMultiControllerEvent((short)i, (short)pending->activeGamepadMask,
+                                       0, 0, 0, 0, 0, 0, 0);
+            pending->valid = false;
+        }
+    }
 
     // GFE will not send haptics events without this magic packet first
     sendEnableHaptics();
@@ -1425,12 +1493,7 @@ int LiSendPenEvent(uint8_t eventType, uint8_t toolType, uint8_t penButtons,
 
 int LiSendControllerArrivalEvent(uint8_t controllerNumber, uint16_t activeGamepadMask, uint8_t type,
                                  uint32_t supportedButtonFlags, uint16_t capabilities) {
-    PPACKET_HOLDER holder;
     int err;
-
-    if (!initialized) {
-        return -2;
-    }
 
     // Sunshine supports up to 16 controllers
     controllerNumber %= MAX_GAMEPADS;
@@ -1440,31 +1503,20 @@ int LiSendControllerArrivalEvent(uint8_t controllerNumber, uint16_t activeGamepa
         capabilities |= LI_CCAP_TOUCHPAD;
     }
 
-    // The arrival event is only supported by Sunshine
-    if (IS_SUNSHINE()) {
-        holder = allocatePacketHolder(0);
-        if (holder == NULL) {
-            return -1;
-        }
+    if (!initialized) {
+        PENDING_CONTROLLER_ARRIVAL* pending = &pendingControllerArrivals[controllerNumber];
+        pending->valid = true;
+        pending->activeGamepadMask = activeGamepadMask;
+        pending->type = type;
+        pending->supportedButtonFlags = supportedButtonFlags;
+        pending->capabilities = capabilities;
+        Limelog("Cached controller %u arrival until input stream startup\n", controllerNumber);
+        return 0;
+    }
 
-        // Send each controller on a separate channel
-        holder->channelId = CTRL_CHANNEL_GAMEPAD_BASE + controllerNumber;
-        holder->enetPacketFlags = ENET_PACKET_FLAG_RELIABLE;
-
-        holder->packet.controllerArrival.header.size = BE32(sizeof(SS_CONTROLLER_ARRIVAL_PACKET) - sizeof(uint32_t));
-        holder->packet.controllerArrival.header.magic = LE32(SS_CONTROLLER_ARRIVAL_MAGIC);
-        holder->packet.controllerArrival.controllerNumber = controllerNumber;
-        holder->packet.controllerArrival.type = type;
-        holder->packet.controllerArrival.capabilities = LE16(capabilities);
-        holder->packet.controllerArrival.supportedButtonFlags = LE32(supportedButtonFlags);
-
-        err = LbqOfferQueueItem(&packetQueue, holder, &holder->entry);
-        if (err != LBQ_SUCCESS) {
-            LC_ASSERT(err == LBQ_BOUND_EXCEEDED);
-            Limelog("Input queue reached maximum size limit\n");
-            freePacketHolder(holder);
-            return err;
-        }
+    err = queueControllerArrivalEvent(controllerNumber, type, supportedButtonFlags, capabilities);
+    if (err != 0) {
+        return err;
     }
 
     // Send a MC event just in case the host software doesn't support arrival events.
