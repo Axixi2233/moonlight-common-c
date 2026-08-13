@@ -68,6 +68,19 @@ typedef struct _QUEUED_ASYNC_CALLBACK {
         } setControllerLed;
         struct {
             uint16_t controllerNumber;
+            uint8_t playerIndicator;
+        } setPlayerIndicator;
+        struct {
+            uint16_t controllerNumber;
+            uint16_t sequence;
+            uint32_t sampleRate;
+            uint16_t pcmLength;
+            uint8_t channels;
+            uint8_t bitsPerSample;
+            uint8_t* pcm;
+        } controllerPcm;
+        struct {
+            uint16_t controllerNumber;
             /**
              * 0x04 - Right trigger
              * 0x08 - Left trigger
@@ -139,6 +152,9 @@ static PPLT_CRYPTO_CONTEXT decryptionCtx;
 #define IDX_SET_MOTION_EVENT 10
 #define IDX_SET_RGB_LED 11
 #define IDX_DS_ADAPTIVE_TRIGGERS 12
+#define IDX_SET_PLAYER_INDICATOR 13
+#define IDX_CONTROLLER_PCM 14
+#define MAX_CONTROLLER_PCM_BYTES 3920
 
 #define CONTROL_STREAM_TIMEOUT_SEC 10
 #define CONTROL_STREAM_LINGER_TIMEOUT_SEC 2
@@ -156,6 +172,9 @@ static const short packetTypesGen3[] = {
     -1,     // Rumble triggers (unused)
     -1,     // Set motion event (unused)
     -1,     // Set RGB LED (unused)
+    -1,     // Set adaptive triggers (unused)
+    -1,     // Set player indicator (unused)
+    -1,     // Native controller PCM (unused)
 };
 static const short packetTypesGen4[] = {
     0x0606, // Request IDR frame
@@ -170,6 +189,9 @@ static const short packetTypesGen4[] = {
     -1,     // Rumble triggers (unused)
     -1,     // Set motion event (unused)
     -1,     // Set RGB LED (unused)
+    -1,     // Set adaptive triggers (unused)
+    -1,     // Set player indicator (unused)
+    -1,     // Native controller PCM (unused)
 };
 static const short packetTypesGen5[] = {
     0x0305, // Start A
@@ -184,6 +206,9 @@ static const short packetTypesGen5[] = {
     -1,     // Rumble triggers (unused)
     -1,     // Set motion event (unused)
     -1,     // Set RGB LED (unused)
+    -1,     // Set adaptive triggers (unused)
+    -1,     // Set player indicator (unused)
+    -1,     // Native controller PCM (unused)
 };
 static const short packetTypesGen7[] = {
     0x0305, // Start A
@@ -198,6 +223,9 @@ static const short packetTypesGen7[] = {
     -1,     // Rumble triggers (unused)
     -1,     // Set motion event (unused)
     -1,     // Set RGB LED (unused)
+    -1,     // Set adaptive triggers (unused)
+    -1,     // Set player indicator (unused)
+    -1,     // Native controller PCM (unused)
 };
 static const short packetTypesGen7Enc[] = {
     0x0302, // Request IDR frame
@@ -213,6 +241,8 @@ static const short packetTypesGen7Enc[] = {
     0x5501, // Set motion event (Sunshine protocol extension)
     0x5502, // Set RGB LED (Sunshine protocol extension)
     0x5503, // Set Adaptive Triggers (Sunshine protocol extension)
+    0x5504, // Set player indicator (Sunshine protocol extension)
+    0x5505, // Native controller audio/haptics PCM (Sunshine protocol extension)
 };
 
 static const char requestIdrFrameGen3[] = { 0, 0 };
@@ -984,7 +1014,20 @@ static void asyncCallbackThreadFunc(void* context) {
                                                   queuedCb->data.dsAdaptiveTrigger.typeLeft,
                                                   queuedCb->data.dsAdaptiveTrigger.typeRight,
                                                   queuedCb->data.dsAdaptiveTrigger.left,
-                                                  queuedCb->data.dsAdaptiveTrigger.right);
+                                                   queuedCb->data.dsAdaptiveTrigger.right);
+            break;
+        case IDX_SET_PLAYER_INDICATOR:
+            ListenerCallbacks.setPlayerIndicator(queuedCb->data.setPlayerIndicator.controllerNumber,
+                                                 queuedCb->data.setPlayerIndicator.playerIndicator);
+            break;
+        case IDX_CONTROLLER_PCM:
+            ListenerCallbacks.controllerPcm(queuedCb->data.controllerPcm.controllerNumber,
+                                            queuedCb->data.controllerPcm.sequence,
+                                            queuedCb->data.controllerPcm.sampleRate,
+                                            queuedCb->data.controllerPcm.channels,
+                                            queuedCb->data.controllerPcm.bitsPerSample,
+                                            queuedCb->data.controllerPcm.pcm,
+                                            queuedCb->data.controllerPcm.pcmLength);
             break;
         default:
             // Unhandled packet type from queueAsyncCallback()
@@ -1002,7 +1045,9 @@ static bool needsAsyncCallback(unsigned short packetType) {
            packetType == packetTypes[IDX_SET_MOTION_EVENT] ||
            packetType == packetTypes[IDX_SET_RGB_LED] ||
            packetType == packetTypes[IDX_HDR_INFO] ||
-           packetType == packetTypes[IDX_DS_ADAPTIVE_TRIGGERS];
+           packetType == packetTypes[IDX_DS_ADAPTIVE_TRIGGERS] ||
+           packetType == packetTypes[IDX_SET_PLAYER_INDICATOR] ||
+           packetType == packetTypes[IDX_CONTROLLER_PCM];
 }
 
 static void queueAsyncCallback(PNVCTL_ENET_PACKET_HEADER_V1 ctlHdr, int packetLength) {
@@ -1012,12 +1057,50 @@ static void queueAsyncCallback(PNVCTL_ENET_PACKET_HEADER_V1 ctlHdr, int packetLe
 
     LC_ASSERT(needsAsyncCallback(ctlHdr->type));
 
-    queuedCb = malloc(sizeof(*queuedCb));
-    if (!queuedCb) {
-        return;
-    }
-
     BbInitializeWrappedBuffer(&bb, (char*)ctlHdr, sizeof(*ctlHdr), packetLength - sizeof(*ctlHdr), BYTE_ORDER_LITTLE);
+
+    if (ctlHdr->type == packetTypes[IDX_CONTROLLER_PCM]) {
+        uint16_t controllerNumber;
+        uint16_t sequence;
+        uint32_t sampleRate;
+        uint16_t pcmLength;
+        uint8_t channels;
+        uint8_t bitsPerSample;
+        unsigned int frameBytes;
+
+        if (!BbGet16(&bb, &controllerNumber) || !BbGet16(&bb, &sequence) ||
+                !BbGet32(&bb, &sampleRate) || !BbGet16(&bb, &pcmLength) ||
+                !BbGet8(&bb, &channels) || !BbGet8(&bb, &bitsPerSample)) {
+            return;
+        }
+        frameBytes = channels * (bitsPerSample / 8);
+        if (sampleRate != 48000 || channels != 4 || bitsPerSample != 16 ||
+                pcmLength == 0 || pcmLength > MAX_CONTROLLER_PCM_BYTES ||
+                frameBytes == 0 || pcmLength % frameBytes != 0 ||
+                bb.position + pcmLength != bb.length) {
+            Limelog("Discarding invalid native controller PCM packet\n");
+            return;
+        }
+
+        queuedCb = malloc(sizeof(*queuedCb) + pcmLength);
+        if (!queuedCb) {
+            return;
+        }
+        queuedCb->data.controllerPcm.controllerNumber = controllerNumber;
+        queuedCb->data.controllerPcm.sequence = sequence;
+        queuedCb->data.controllerPcm.sampleRate = sampleRate;
+        queuedCb->data.controllerPcm.pcmLength = pcmLength;
+        queuedCb->data.controllerPcm.channels = channels;
+        queuedCb->data.controllerPcm.bitsPerSample = bitsPerSample;
+        queuedCb->data.controllerPcm.pcm = (uint8_t*)(queuedCb + 1);
+        memcpy(queuedCb->data.controllerPcm.pcm, &bb.buffer[bb.position], pcmLength);
+        queuedCb->typeIndex = IDX_CONTROLLER_PCM;
+    }
+    else {
+        queuedCb = malloc(sizeof(*queuedCb));
+        if (!queuedCb) {
+            return;
+        }
 
     if (ctlHdr->type == packetTypes[IDX_RUMBLE_DATA]) {
         BbAdvanceBuffer(&bb, 4);
@@ -1067,11 +1150,18 @@ static void queueAsyncCallback(PNVCTL_ENET_PACKET_HEADER_V1 ctlHdr, int packetLe
         }
         queuedCb->typeIndex = IDX_DS_ADAPTIVE_TRIGGERS;
     }
+    else if (ctlHdr->type == packetTypes[IDX_SET_PLAYER_INDICATOR]) {
+        BbGet16(&bb, &queuedCb->data.setPlayerIndicator.controllerNumber);
+        BbGet8(&bb, &queuedCb->data.setPlayerIndicator.playerIndicator);
+
+        queuedCb->typeIndex = IDX_SET_PLAYER_INDICATOR;
+    }
     else {
         // Unhandled packet type from needsAsyncCallback()
         LC_ASSERT(false);
         free(queuedCb);
         return;
+    }
     }
 
     err = LbqOfferQueueItem(&asyncCallbackQueue, queuedCb, &queuedCb->entry);

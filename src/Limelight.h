@@ -479,6 +479,16 @@ typedef void(*ConnListenerSetAdaptiveTriggers)(uint16_t controllerNumber, uint8_
 // This callback is invoked to set a controller's RGB LED (if present).
 typedef void(*ConnListenerSetControllerLED)(uint16_t controllerNumber, uint8_t r, uint8_t g, uint8_t b);
 
+// This callback is invoked to set a controller's player indicator LEDs (if present).
+typedef void(*ConnListenerSetPlayerIndicator)(uint16_t controllerNumber, uint8_t playerIndicator);
+
+// This callback delivers native interleaved controller audio/haptics PCM captured by Sunshine.
+// The PCM pointer remains valid only for the duration of the callback.
+typedef void(*ConnListenerControllerPcm)(uint16_t controllerNumber, uint16_t sequence,
+                                        uint32_t sampleRate, uint8_t channels,
+                                        uint8_t bitsPerSample, const uint8_t* pcm,
+                                        uint16_t pcmLength);
+
 typedef struct _CONNECTION_LISTENER_CALLBACKS {
     ConnListenerStageStarting stageStarting;
     ConnListenerStageComplete stageComplete;
@@ -493,6 +503,8 @@ typedef struct _CONNECTION_LISTENER_CALLBACKS {
     ConnListenerSetMotionEventState setMotionEventState;
     ConnListenerSetControllerLED setControllerLED;
     ConnListenerSetAdaptiveTriggers setAdaptiveTriggers;
+    ConnListenerSetPlayerIndicator setPlayerIndicator;
+    ConnListenerControllerPcm controllerPcm;
 } CONNECTION_LISTENER_CALLBACKS, *PCONNECTION_LISTENER_CALLBACKS;
 
 // Use this function to zero the connection callbacks when allocated on the stack or heap
@@ -777,6 +789,13 @@ int LiSendMultiControllerEvent(short controllerNumber, short activeGamepadMask,
 #define LI_CCAP_GYRO            0x20 // Can report gyroscope events via LiSendControllerMotionEvent()
 #define LI_CCAP_BATTERY_STATE   0x40 // Reports battery state via LiSendControllerBatteryEvent()
 #define LI_CCAP_RGB_LED         0x80 // Can set RGB LED state via ConnListenerSetControllerLED()
+#define LI_CCAP_DUAL_TOUCHPAD  0x100 // Reports touchpad events from 2 separate touchpads
+#define LI_CCAP_HAPTIC_PCM     0x200 // Can consume native controller PCM via ConnListenerControllerPcm()
+#define LI_CCAP_EMULATION_MASK 0xC00 // Client preference for the virtual controller type on the host
+#define LI_CCAP_EMULATION_AUTO 0x000 // Let the host select the virtual controller type
+#define LI_CCAP_EMULATION_X360 0x400 // Request an Xbox 360 virtual controller
+#define LI_CCAP_EMULATION_DS4  0x800 // Request a DualShock 4 virtual controller
+#define LI_CCAP_EMULATION_DS5  0xC00 // Request a DualSense virtual controller
 int LiSendControllerArrivalEvent(uint8_t controllerNumber, uint16_t activeGamepadMask, uint8_t type,
                                  uint32_t supportedButtonFlags, uint16_t capabilities);
 
