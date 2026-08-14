@@ -803,6 +803,9 @@ int LiSendMultiControllerEvent(short controllerNumber, short activeGamepadMask,
 int LiSendControllerArrivalEvent(uint8_t controllerNumber, uint16_t activeGamepadMask, uint8_t type,
                                  uint32_t supportedButtonFlags, uint16_t capabilities);
 
+// Cancels a controller arrival cached before input stream startup. This is a no-op after startup.
+void LiCancelPendingControllerArrivalEvent(uint8_t controllerNumber);
+
 // This function is similar to LiSendTouchEvent(), but the touch events are associated with a
 // touchpad device present on a game controller instead of a touchscreen.
 //

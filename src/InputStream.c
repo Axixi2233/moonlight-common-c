@@ -1523,6 +1523,16 @@ int LiSendControllerArrivalEvent(uint8_t controllerNumber, uint16_t activeGamepa
     return LiSendMultiControllerEvent(controllerNumber, activeGamepadMask, 0, 0, 0, 0, 0, 0, 0);
 }
 
+void LiCancelPendingControllerArrivalEvent(uint8_t controllerNumber) {
+    controllerNumber %= MAX_GAMEPADS;
+
+    if (!initialized && pendingControllerArrivals[controllerNumber].valid) {
+        pendingControllerArrivals[controllerNumber].valid = false;
+        Limelog("Discarded cached controller %u arrival after pre-stream removal\n",
+                controllerNumber);
+    }
+}
+
 int LiSendControllerTouchEvent2(uint8_t controllerNumber, uint8_t eventType, uint8_t touchpadIndex, uint32_t pointerId, float x, float y, float pressure) {
     PPACKET_HOLDER holder;
     int err;
