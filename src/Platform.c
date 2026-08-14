@@ -459,22 +459,28 @@ uint64_t PltGetMicroseconds(void) {
 
 #elif defined(LC_DARWIN)
 
-static uint64_t start_ns;
+static mach_timebase_info_data_t darwin_timebase;
+static uint64_t darwin_start_ticks;
 
 void PltTicksInit(void) {
     if (ticks_started) {
         return;
     }
     ticks_started = true;
-    start_ns = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    mach_timebase_info(&darwin_timebase);
+    darwin_start_ticks = mach_absolute_time();
 }
 
 uint64_t PltGetMicroseconds(void) {
     if (!ticks_started) {
         PltTicksInit();
     }
-    const uint64_t now_ns = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
-    return (now_ns - start_ns) / 1000;
+    const uint64_t elapsed_ticks = mach_absolute_time() - darwin_start_ticks;
+    const uint64_t whole = elapsed_ticks / darwin_timebase.denom;
+    const uint64_t remainder = elapsed_ticks % darwin_timebase.denom;
+    const uint64_t elapsed_ns = whole * darwin_timebase.numer +
+                                (remainder * darwin_timebase.numer) / darwin_timebase.denom;
+    return elapsed_ns / 1000;
 }
 
 #elif defined(__vita__)
